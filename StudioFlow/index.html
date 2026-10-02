@@ -2416,6 +2416,19 @@
     #appShell.sidebar-collapsed #workspaceStorageCard:hover::before { color:#4f46e5; }
   }
 
+
+  /* v6.6 sync mode + history */
+  .sync-mode-wrap{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .sync-mode-btn.is-active{background:#4f46e5;color:#fff;border-color:#4f46e5;box-shadow:0 8px 20px rgba(79,70,229,.18)}
+  .dark .sync-mode-btn.is-active{background:#6366f1;border-color:#6366f1;color:#fff}
+  .sync-dirty-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.05em;background:#fff7ed;color:#c2410c;border:1px solid #fed7aa}
+  .dark .sync-dirty-pill{background:rgba(249,115,22,.1);color:#fdba74;border-color:rgba(249,115,22,.22)}
+  .history-list{display:grid;gap:8px}
+  .history-item{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:10px 11px;border-radius:13px;border:1px solid #e2e8f0;background:#f8fafc}
+  .dark .history-item{border-color:rgba(255,255,255,.08);background:rgba(255,255,255,.025)}
+  .history-title{font-size:11px;font-weight:900;color:#334155}.dark .history-title{color:#e2e8f0}
+  .history-meta{font-size:10px;line-height:1.45;color:#94a3b8}
+
 </style>
   <style>
     * { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
@@ -3082,7 +3095,7 @@
 
 
 <style>
-  /* StudioFlow v6.1 — Firebase cloud workspace */
+  /* StudioFlow v6.6 — Firebase sync modes + task revision history */
   .cloud-status-btn{display:inline-flex;align-items:center;gap:.45rem;white-space:nowrap}
   .cloud-dot{width:8px;height:8px;border-radius:999px;background:#94a3b8;box-shadow:0 0 0 3px rgba(148,163,184,.12)}
   .cloud-dot.connecting{background:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.13)}
@@ -3251,7 +3264,9 @@
               <button class="btn" id="moreBtn"><span class="hidden sm:inline">Backup</span><span>•••</span></button>
               <div class="menu" id="backupMenu">
                 <button id="exportBtn">⬇ Export backup (JSON)</button>
-                <label for="importFile">⬆ Import backup (JSON)</label>
+                <label for="mergeFile">➕ Merge backup (safe)</label>
+                <input type="file" id="mergeFile" accept="application/json,.json" />
+                <label for="importFile">↺ Replace with backup</label>
                 <input type="file" id="importFile" accept="application/json,.json" />
                 <div class="sep"></div>
                 <button id="clearDoneBtn">✓ Remove DONE tasks</button>
@@ -3584,11 +3599,22 @@
         </section>
 
         <section class="rounded-2xl border border-slate-200 p-4 dark:border-white/10">
-          <h3 class="text-sm font-extrabold">3. Data controls</h3>
-          <p class="cloud-small mt-1">Normal edits sync automatically after sign-in. These controls are for migration or recovery.</p>
-          <div class="cloud-actions mt-3">
-            <button type="button" class="btn" id="cloudUploadBtn">↑ Upload this browser to cloud</button>
-            <button type="button" class="btn" id="cloudPullBtn">↓ Reload from cloud</button>
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div><h3 class="text-sm font-extrabold">3. Sync mode</h3><p id="syncModeHelp" class="cloud-small mt-1">Auto Sync saves every change to Firebase. Manual Sync keeps edits local until you press Sync now.</p></div>
+            <span id="syncDirtyPill" class="sync-dirty-pill" hidden>● UNSYNCED CHANGES</span>
+          </div>
+          <div class="sync-mode-wrap mt-3">
+            <button type="button" class="btn small sync-mode-btn" id="autoSyncBtn">⚡ Auto Sync</button>
+            <button type="button" class="btn small sync-mode-btn" id="manualSyncBtn">✋ Manual Sync</button>
+            <button type="button" class="btn primary" id="cloudSyncNowBtn">↻ Sync now</button>
+          </div>
+          <p class="cloud-small mt-2"><strong>Recommended:</strong> Auto Sync for normal daily use. Switch to Manual before bulk imports or major cleanup if you want to review changes before sending them to Firebase.</p>
+          <div class="mt-4 border-t border-slate-200 pt-4 dark:border-white/10">
+            <div class="text-[11px] font-extrabold text-slate-600 dark:text-slate-300">Migration / recovery</div>
+            <div class="cloud-actions mt-2">
+              <button type="button" class="btn" id="cloudUploadBtn">↑ Upload this browser to cloud</button>
+              <button type="button" class="btn" id="cloudPullBtn">↓ Reload from cloud</button>
+            </div>
           </div>
           <p id="cloudLastSync" class="cloud-small mt-2">Last sync: —</p>
         </section>
@@ -3605,7 +3631,7 @@
   <div class="toast" id="toast"></div>
 
 <script>
-/* StudioFlow v6.5.1 — responsive sidebar + KPI alignment + List / Grid / Details task views */
+/* StudioFlow v6.6 — Firebase sync modes + task revision history */
 (() => {
   const STORAGE_KEY = 'videoTaskManager.tasks.v1';
   const THEME_KEY = 'videoTaskManager.theme.v1';
@@ -3614,6 +3640,9 @@
   const TASK_LAYOUT_KEY = 'studioflow.taskLayout.v1';
   const TIMER_TICK_MS = 1000;
   const FIREBASE_CONFIG_KEY = 'studioflow.firebase.config.v1';
+  const SYNC_MODE_KEY = 'studioflow.firebase.syncMode.v1';
+  const SYNC_DIRTY_KEY = 'studioflow.firebase.syncDirty.v1';
+  const HISTORY_LIMIT = 10;
   const FIREBASE_SDK_VERSION = '12.19.0';
   const firebaseState = {
     configured:false, ready:false, user:null, auth:null, db:null, provider:null,
@@ -3625,6 +3654,8 @@
   const PRIORITIES = ['HIGH','MEDIUM','LOW'];
 
   let tasks = loadTasks();
+  let syncMode = localStorage.getItem(SYNC_MODE_KEY)==='manual' ? 'manual' : 'auto';
+  let cloudDirty = localStorage.getItem(SYNC_DIRTY_KEY)==='true';
   let currentView = 'all';
   let hideDone = localStorage.getItem(HIDE_DONE_KEY) !== 'false';
   let taskLayout = ['list','grid','details'].includes(localStorage.getItem(TASK_LAYOUT_KEY)) ? localStorage.getItem(TASK_LAYOUT_KEY) : 'list';
@@ -3654,6 +3685,7 @@
     setTheme(localStorage.getItem(THEME_KEY) || 'light');
     normalizeTimerState();
     bindEvents();
+    updateSyncModeUi();
     setupSidebarCollapse();
     syncTaskLayoutButtons();
     applyTaskLayout();
@@ -3791,6 +3823,7 @@
     $('moreBtn').addEventListener('click', (e) => { e.stopPropagation(); els.backupMenu.classList.toggle('show'); });
     document.addEventListener('click', (e) => { if (!e.target.closest('.menu-wrap')) els.backupMenu.classList.remove('show'); });
     $('exportBtn').addEventListener('click', exportBackup);
+    $('mergeFile').addEventListener('change', mergeBackup);
     $('importFile').addEventListener('change', importBackup);
     $('clearDoneBtn').addEventListener('click', clearDone);
     $('clearAllBtn').addEventListener('click', clearAll);
@@ -3806,7 +3839,10 @@
     $('cloudSignOutBtn').addEventListener('click', signOutCloud);
     $('cloudUploadBtn').addEventListener('click', uploadLocalToCloud);
     $('cloudPullBtn').addEventListener('click', pullCloudNow);
-    window.addEventListener('online', ()=>{ if(firebaseState.user) scheduleCloudPush(250); });
+    $('autoSyncBtn').addEventListener('click', ()=>setSyncMode('auto'));
+    $('manualSyncBtn').addEventListener('click', ()=>setSyncMode('manual'));
+    $('cloudSyncNowBtn').addEventListener('click', ()=>safeCloudSyncNow(false));
+    window.addEventListener('online', ()=>{ if(firebaseState.user && syncMode==='auto') scheduleCloudPush(250); else refreshCloudUi(); });
     $('pauseRunningTimerBtn').addEventListener('click', pauseActiveTimer);
     $('focusQueue').addEventListener('click', handleTaskAction);
     $('focusQueue').addEventListener('click', handleTaskOpen);
@@ -4404,6 +4440,8 @@
     const linkHtml=linkCards.length?`<div class="link-stack">${linkCards.join('')}</div>`:`<div class="detail-empty-copy text-xs">No files or reference links added yet.</div>`;
     const added=task.dateAdded?formatDateTime(task.dateAdded):'—';
     const updated=task.updatedAt?formatDateTime(task.updatedAt):'—';
+    const history=(Array.isArray(task.history)?task.history:[]).slice().reverse();
+    const historyHtml=history.length?`<div class="history-list">${history.map(entry=>`<div class="history-item"><div class="min-w-0 flex-1"><div class="history-title">${escapeHtml(entry.label||'Previous version')}</div><div class="history-meta">${escapeHtml(formatDateTime(entry.at))}</div></div><button type="button" class="btn small" data-action="revertHistory" data-history-id="${escapeAttr(entry.id||'')}">↶ Revert</button></div>`).join('')}</div>`:`<div class="detail-empty-copy text-xs">No previous versions yet. StudioFlow keeps the last ${HISTORY_LIMIT} task versions automatically after changes.</div>`;
     els.detailContent.innerHTML=`
       <div class="detail-hero">
         <div class="flex items-start justify-between gap-4">
@@ -4476,6 +4514,11 @@
               ${sessionHtml}
             </section>
 
+            <section class="detail-section" data-id="${escapeAttr(task.id)}">
+              <div class="detail-section-title"><span>Revision history</span><span class="text-[10px] normal-case tracking-normal">Last ${HISTORY_LIMIT} versions</span></div>
+              ${historyHtml}
+            </section>
+
             <section class="detail-section">
               <div class="detail-section-title"><span>Quick help</span></div>
               <div class="text-xs leading-5 text-slate-500 dark:text-slate-400">Start the timer when you begin editing. Only one task can run at a time. If you work ahead, pause the timer and assign that completed session to tomorrow using Time Credit. Actual tracked time is never changed.</div>
@@ -4511,7 +4554,7 @@
 
   function saveForm(e) {
     e.preventDefault(); const id=els.taskId.value; const existing=tasks.find(t=>t.id===id);
-    const scriptText=els.scriptText.value.trim(); const task={ id:id||cryptoId(), client:clean(els.client.value), status:els.status.value, priority:els.priority.value, title:clean(els.title.value), taskType:clean(els.taskType.value), clipDate:els.clipDate.value, clientDeadline:els.clientDeadline.value, myDeadline:els.myDeadline.value, editingTime:els.time.value?Number(els.time.value):'', scriptAvailable:Boolean(els.scriptAvailable.checked||scriptText), scriptText, referenceLink:clean(els.referenceLink.value), link:clean(els.link.value), notes:els.notes.value.trim(), dateAdded:existing?.dateAdded||new Date().toISOString(), updatedAt:new Date().toISOString(), trackedSeconds:Number(existing?.trackedSeconds||0), timerStartedAt:existing?.timerStartedAt||null, timeSessions:Array.isArray(existing?.timeSessions)?existing.timeSessions:[] };
+    const scriptText=els.scriptText.value.trim(); const task={ id:id||cryptoId(), client:clean(els.client.value), status:els.status.value, priority:els.priority.value, title:clean(els.title.value), taskType:clean(els.taskType.value), clipDate:els.clipDate.value, clientDeadline:els.clientDeadline.value, myDeadline:els.myDeadline.value, editingTime:els.time.value?Number(els.time.value):'', scriptAvailable:Boolean(els.scriptAvailable.checked||scriptText), scriptText, referenceLink:clean(els.referenceLink.value), link:clean(els.link.value), notes:els.notes.value.trim(), dateAdded:existing?.dateAdded||new Date().toISOString(), updatedAt:new Date().toISOString(), trackedSeconds:Number(existing?.trackedSeconds||0), timerStartedAt:existing?.timerStartedAt||null, timeSessions:Array.isArray(existing?.timeSessions)?existing.timeSessions:[], history:Array.isArray(existing?.history)?existing.history:[] };
     if(!task.title)return; if(existing)tasks=tasks.map(t=>t.id===id?task:t); else tasks.push(task); persist(); closeModal(); render(); toast(existing?'Task updated.':'New task added.');
   }
 
@@ -4548,6 +4591,17 @@
       task.status=task.status==='DONE'?'REVISION':'DONE'; task.updatedAt=new Date().toISOString();
       persist(); render(); toast(task.status==='DONE'?'Task marked DONE. Timer stopped.':'Task reopened as REVISION.');
       if(els.detailModal.classList.contains('show')) openTaskDetails(task.id);
+      return;
+    }
+    if(action==='revertHistory'){
+      const historyId=btn.dataset.historyId||'';
+      const entry=(Array.isArray(task.history)?task.history:[]).find(h=>String(h.id||'')===historyId);
+      if(!entry?.snapshot) return toast('That previous version is no longer available.');
+      if(!confirm(`Revert “${task.title}” to the version from ${formatDateTime(entry.at)}?\n\nYour current version will be kept in history so you can undo the revert.`)) return;
+      const preservedHistory=Array.isArray(task.history)?task.history:[];
+      const restored={...JSON.parse(JSON.stringify(entry.snapshot)),id:task.id,history:preservedHistory,updatedAt:new Date().toISOString()};
+      tasks=tasks.map(t=>t.id===task.id?restored:t);
+      persist(); render(); openTaskDetails(task.id); toast('Task reverted. Current version was saved in history.');
       return;
     }
     if(action==='delete'&&confirm(`Delete “${task.title}”?`)){
@@ -4792,8 +4846,135 @@
 
   function loadTasks(){ try{const parsed=JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]'); return Array.isArray(parsed)?parsed:[];}catch{return[];} }
   function saveLocalOnly(){ localStorage.setItem(STORAGE_KEY,JSON.stringify(tasks)); }
-  function persist(){ saveLocalOnly(); scheduleCloudPush(); }
-  function exportBackup(){ const blob=new Blob([JSON.stringify({version:10,exportedAt:new Date().toISOString(),tasks},null,2)],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=`video-task-backup-${dateStamp()}.json`; a.click(); URL.revokeObjectURL(url); els.backupMenu.classList.remove('show'); toast('Backup exported.'); }
+  function taskForHistory(task){
+    if(!task||typeof task!=='object') return {};
+    const clone=JSON.parse(JSON.stringify(task));
+    delete clone.history; delete clone.ownerUid;
+    return clone;
+  }
+  function taskCompareForHistory(task){
+    const clone=taskForHistory(task);
+    delete clone.updatedAt;
+    return JSON.stringify(clone);
+  }
+  function describeTaskChange(before,after){
+    const labels={title:'Title',client:'Client',status:'Status',priority:'Priority',taskType:'Task type',clientDeadline:'Client deadline',myDeadline:'My deadline',editingTime:'Estimated time',scriptText:'Script',notes:'Notes',referenceLink:'Reference link',link:'Files link',trackedSeconds:'Tracked time',timerStartedAt:'Timer'};
+    const changed=[];
+    for(const [key,label] of Object.entries(labels)){ if(JSON.stringify(before?.[key]??null)!==JSON.stringify(after?.[key]??null)) changed.push(label); }
+    return changed.length?changed.slice(0,4).join(', ')+(changed.length>4?` +${changed.length-4} more`:''):'Task updated';
+  }
+  function recordTaskHistoryBeforeSave(){
+    let previous=[];
+    try{ const parsed=JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]'); if(Array.isArray(parsed)) previous=parsed; }catch{}
+    const oldById=new Map(previous.filter(t=>t?.id).map(t=>[t.id,t]));
+    for(const task of tasks){
+      if(!task?.id) continue;
+      const old=oldById.get(task.id);
+      if(!old) continue;
+      if(taskCompareForHistory(old)===taskCompareForHistory(task)) continue;
+      const existing=Array.isArray(task.history)?task.history:(Array.isArray(old.history)?old.history:[]);
+      const entry={id:cryptoId(),at:new Date().toISOString(),label:describeTaskChange(old,task),snapshot:taskForHistory(old)};
+      task.history=[...existing,entry].slice(-HISTORY_LIMIT);
+    }
+  }
+  function setCloudDirty(value){
+    cloudDirty=Boolean(value);
+    localStorage.setItem(SYNC_DIRTY_KEY,String(cloudDirty));
+    updateSyncModeUi();
+  }
+  function persist(){
+    recordTaskHistoryBeforeSave();
+    saveLocalOnly();
+    if(firebaseState.user){
+      if(syncMode==='auto') scheduleCloudPush();
+      else { setCloudDirty(true); refreshCloudUi('Changes saved locally. Press Sync now when you are ready.',''); }
+    }
+  }
+  function exportBackup(){ const blob=new Blob([JSON.stringify({version:11,exportedAt:new Date().toISOString(),tasks,syncMode},null,2)],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=`video-task-backup-${dateStamp()}.json`; a.click(); URL.revokeObjectURL(url); els.backupMenu.classList.remove('show'); toast('Backup exported.'); }
+  function taskUpdatedMs(task){
+    const candidates=[task?.updatedAt,task?.lastUpdated,task?.dateAdded,task?.createdAt];
+    for(const value of candidates){ const ms=Date.parse(value||''); if(Number.isFinite(ms)) return ms; }
+    return 0;
+  }
+  function isBlankMergeValue(value){
+    return value===undefined||value===null||value===''||(Array.isArray(value)&&value.length===0);
+  }
+  function mergeTimeSessions(a,b){
+    const all=[...(Array.isArray(a)?a:[]),...(Array.isArray(b)?b:[])];
+    const seen=new Set();
+    return all.filter(session=>{
+      const key=[session?.startedAt||session?.start||'',session?.endedAt||session?.end||'',Number(session?.seconds||session?.duration||0),session?.creditDate||''].join('|');
+      if(seen.has(key)) return false; seen.add(key); return true;
+    }).sort((x,y)=>Date.parse(x?.startedAt||x?.start||0)-Date.parse(y?.startedAt||y?.start||0));
+  }
+  function mergeTaskPair(current,incoming){
+    const currentMs=taskUpdatedMs(current), incomingMs=taskUpdatedMs(incoming);
+    const newer=incomingMs>currentMs?incoming:current;
+    const older=newer===incoming?current:incoming;
+    const merged={...older,...newer};
+    // Fill empty fields from the older copy so scripts, links, notes, and metadata are not lost.
+    for(const key of new Set([...Object.keys(older||{}),...Object.keys(newer||{})])){
+      if(isBlankMergeValue(merged[key])&&!isBlankMergeValue(older?.[key])) merged[key]=older[key];
+    }
+    merged.id=current?.id||incoming?.id||cryptoId();
+    merged.timeSessions=mergeTimeSessions(current?.timeSessions,incoming?.timeSessions);
+    const histories=[...(Array.isArray(current?.history)?current.history:[]),...(Array.isArray(incoming?.history)?incoming.history:[])];
+    const seenHistory=new Set();
+    merged.history=histories.filter(h=>{ const key=String(h?.id||`${h?.at||''}|${h?.label||''}`); if(seenHistory.has(key)) return false; seenHistory.add(key); return true; }).sort((a,b)=>Date.parse(a?.at||0)-Date.parse(b?.at||0)).slice(-HISTORY_LIMIT);
+    merged.trackedSeconds=Math.max(Number(current?.trackedSeconds||0),Number(incoming?.trackedSeconds||0));
+    // Keep the earliest known added date and the newest known updated date.
+    const added=[current?.dateAdded,incoming?.dateAdded].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b));
+    if(added.length) merged.dateAdded=added[0];
+    const updated=[current?.updatedAt,incoming?.updatedAt].filter(Boolean).sort((a,b)=>Date.parse(b)-Date.parse(a));
+    if(updated.length) merged.updatedAt=updated[0];
+    return merged;
+  }
+  function mergeTaskArrays(base,incoming){
+    const result=[]; const byId=new Map();
+    for(const raw of [...(Array.isArray(base)?base:[]),...(Array.isArray(incoming)?incoming:[])]){
+      if(!raw||typeof raw!=='object') continue;
+      const task={...raw}; if(!task.id) task.id=cryptoId();
+      if(byId.has(task.id)){
+        const index=byId.get(task.id); result[index]=mergeTaskPair(result[index],task);
+      }else{ byId.set(task.id,result.length); result.push(task); }
+    }
+    return result;
+  }
+  async function getCloudTasksForMerge(){
+    if(!firebaseState.user||!firebaseState.ready) return [];
+    const col=userTaskCollection(); if(!col) return [];
+    const snap=await firebaseState.storeApi.getDocs(col);
+    return snap.docs.map(d=>stripCloudMeta({id:d.id,...d.data()}));
+  }
+  function mergeBackup(e){
+    const file=e.target.files?.[0]; if(!file)return;
+    const reader=new FileReader();
+    reader.onload=async()=>{
+      try{
+        const data=JSON.parse(reader.result); const incoming=Array.isArray(data)?data:data.tasks;
+        if(!Array.isArray(incoming)) throw new Error('Invalid file');
+        if(!confirm(`Merge ${incoming.length} backup task${incoming.length===1?'':'s'} with your current workspace?\n\nNothing will be deleted. Matching task IDs are combined and the newer task data is kept.`)) return;
+        const before=[...tasks];
+        let base=before;
+        if(firebaseState.user){
+          try{ base=mergeTaskArrays(base,await getCloudTasksForMerge()); }
+          catch(err){ if(!confirm(`Could not read the latest cloud copy (${err?.message||'unknown error'}). Continue merging with the tasks already loaded in this browser?`)) return; }
+        }
+        const existingIds=new Set(base.map(t=>t?.id).filter(Boolean));
+        const incomingIds=new Set(incoming.map(t=>t?.id).filter(Boolean));
+        const added=[...incomingIds].filter(id=>!existingIds.has(id)).length + incoming.filter(t=>!t?.id).length;
+        const matched=[...incomingIds].filter(id=>existingIds.has(id)).length;
+        tasks=mergeTaskArrays(base,incoming);
+        normalizeTimerState(); saveLocalOnly(); render();
+        if(firebaseState.user){ await syncAllTasksToCloud(true); }
+        els.backupMenu.classList.remove('show');
+        toast(`Backup merged: ${added} added, ${matched} matched.`);
+        alert(`Merge complete.\n\n${added} new task${added===1?'':'s'} added\n${matched} matching task${matched===1?'':'s'} combined\n${tasks.length} total task${tasks.length===1?'':'s'} now in StudioFlow${firebaseState.user?' and synced to Firebase':''}.`);
+      }catch(err){ alert(`Could not merge this backup file.\n\n${err?.message||''}`); }
+      e.target.value='';
+    };
+    reader.readAsText(file);
+  }
   function importBackup(e){ const file=e.target.files?.[0]; if(!file)return; const reader=new FileReader(); reader.onload=()=>{try{const data=JSON.parse(reader.result); const incoming=Array.isArray(data)?data:data.tasks; if(!Array.isArray(incoming))throw new Error('Invalid file'); if(!confirm(`Import ${incoming.length} tasks? This will replace the tasks currently stored in this browser.`))return; tasks=incoming; persist(); render(); toast('Backup imported.');}catch{alert('Could not import this backup file.');} e.target.value='';}; reader.readAsText(file); }
   function clearDone(){ const count=tasks.filter(t=>t.status==='DONE').length; if(!count)return toast('No DONE tasks to remove.'); if(confirm(`Remove ${count} DONE task${count===1?'':'s'}? Export a backup first if you may need them later.`)){tasks=tasks.filter(t=>t.status!=='DONE');persist();render();toast('DONE tasks removed.');} }
   function clearAll(){ if(tasks.length&&confirm('Clear ALL tasks stored in this browser? This cannot be undone unless you exported a backup.')){tasks=[];persist();render();toast('All tasks cleared.');} }
@@ -4915,12 +5096,16 @@
       firebaseState.cloudTaskCache=new Map(cloudTasks.map(t=>[t.id,cloudJson(t)]));
 
       if(cloudTasks.length){
-        tasks=cloudTasks;
+        const before=JSON.stringify(tasks);
+        tasks=mergeTaskArrays(cloudTasks,tasks);
         normalizeTimerState(); saveLocalOnly(); render();
+        if(syncMode==='auto'){ await syncAllTasksToCloud(true); setCloudDirty(false); }
+        else if(JSON.stringify(tasks)!==before || tasks.length!==cloudTasks.length) setCloudDirty(true);
       }else if(tasks.length){
-        await syncAllTasksToCloud(true);
+        if(syncMode==='auto'){ await syncAllTasksToCloud(true); setCloudDirty(false); }
+        else setCloudDirty(true);
       }
-      startCloudListener();
+      if(syncMode==='auto') startCloudListener();
       firebaseState.lastSyncAt=new Date(); refreshCloudUi();
     }catch(err){
       firebaseState.error=err?.message||String(err); refreshCloudUi(firebaseState.error,'error');
@@ -4928,7 +5113,7 @@
   }
 
   function startCloudListener(){
-    if(!firebaseState.user) return;
+    if(!firebaseState.user||syncMode!=='auto') return;
     if(firebaseState.unsubscribe) firebaseState.unsubscribe();
     const col=userTaskCollection();
     firebaseState.unsubscribe=firebaseState.storeApi.onSnapshot(col,snap=>{
@@ -4936,7 +5121,7 @@
       firebaseState.cloudTaskCache=new Map(remote.map(t=>[t.id,cloudJson(t)]));
       if(firebaseState.syncing) return;
       firebaseState.applyingRemote=true;
-      tasks=remote;
+      tasks=mergeTaskArrays(remote,tasks);
       normalizeTimerState(); saveLocalOnly(); render();
       firebaseState.applyingRemote=false;
       firebaseState.lastSyncAt=new Date(); refreshCloudUi();
@@ -4947,6 +5132,7 @@
 
   function scheduleCloudPush(delay=700){
     if(firebaseState.applyingRemote||!firebaseState.user||!firebaseState.ready) return;
+    if(syncMode!=='auto'){ setCloudDirty(true); return; }
     clearTimeout(firebaseState.pushTimer);
     firebaseState.pushTimer=setTimeout(()=>syncAllTasksToCloud(false),delay);
     refreshCloudUi('Saving changes…','connecting');
@@ -4975,10 +5161,41 @@
       }
       if(writes) await batch.commit();
       firebaseState.cloudTaskCache=new Map(tasks.filter(t=>t?.id).map(t=>[t.id,cloudJson(JSON.parse(cloudJson(t)))]));
-      firebaseState.lastSyncAt=new Date(); firebaseState.error=''; refreshCloudUi();
+      firebaseState.lastSyncAt=new Date(); firebaseState.error=''; setCloudDirty(false); refreshCloudUi();
     }catch(err){
       firebaseState.error=err?.message||String(err); refreshCloudUi(firebaseState.error,'error');
     }finally{ firebaseState.syncing=false; }
+  }
+
+  function updateSyncModeUi(){
+    const autoBtn=$('autoSyncBtn'), manualBtn=$('manualSyncBtn'), dirty=$('syncDirtyPill'), help=$('syncModeHelp');
+    if(autoBtn) autoBtn.classList.toggle('is-active',syncMode==='auto');
+    if(manualBtn) manualBtn.classList.toggle('is-active',syncMode==='manual');
+    if(dirty) dirty.hidden=!cloudDirty;
+    if(help) help.textContent=syncMode==='auto'?'Auto Sync is on: edits are saved locally first, then sent to Firebase automatically.':'Manual Sync is on: edits stay in this browser until you press Sync now.';
+  }
+  async function setSyncMode(mode){
+    if(!['auto','manual'].includes(mode)||mode===syncMode) return;
+    syncMode=mode; localStorage.setItem(SYNC_MODE_KEY,mode);
+    if(firebaseState.unsubscribe){ firebaseState.unsubscribe(); firebaseState.unsubscribe=null; }
+    updateSyncModeUi();
+    if(mode==='manual'){ refreshCloudUi('Manual Sync enabled. Changes stay local until Sync now.',''); toast('Manual Sync enabled.'); return; }
+    toast('Auto Sync enabled.');
+    if(firebaseState.user){ await safeCloudSyncNow(true); startCloudListener(); }
+    refreshCloudUi();
+  }
+  async function safeCloudSyncNow(silent=false){
+    if(!firebaseState.user||!firebaseState.ready){ if(!silent) toast('Sign in to Firebase first.'); return; }
+    if(firebaseState.syncing) return;
+    refreshCloudUi('Safely merging browser and Firebase tasks…','connecting');
+    try{
+      const cloudTasks=await getCloudTasksForMerge();
+      tasks=mergeTaskArrays(cloudTasks,tasks);
+      normalizeTimerState(); saveLocalOnly(); render();
+      await syncAllTasksToCloud(true);
+      setCloudDirty(false);
+      if(!silent) toast('Firebase sync complete.');
+    }catch(err){ firebaseState.error=err?.message||String(err); refreshCloudUi(firebaseState.error,'error'); if(!silent) alert(firebaseState.error); }
   }
 
   async function uploadLocalToCloud(){
@@ -4994,7 +5211,7 @@
       const snap=await firebaseState.storeApi.getDocs(userTaskCollection());
       tasks=snap.docs.map(d=>stripCloudMeta({id:d.id,...d.data()}));
       firebaseState.cloudTaskCache=new Map(tasks.map(t=>[t.id,cloudJson(t)]));
-      normalizeTimerState(); saveLocalOnly(); render(); firebaseState.lastSyncAt=new Date(); refreshCloudUi(); toast('Cloud tasks loaded.');
+      normalizeTimerState(); saveLocalOnly(); render(); setCloudDirty(false); firebaseState.lastSyncAt=new Date(); refreshCloudUi(); toast('Cloud tasks loaded.');
     }catch(err){ alert(err?.message||'Could not load cloud tasks.'); }
   }
 
@@ -5004,10 +5221,11 @@
     const online=signedIn&&firebaseState.ready&&!firebaseState.error;
     const dot=els.cloudDot;
     dot.className='cloud-dot'+(mode==='connecting'?' connecting':mode==='error'||firebaseState.error?' error':online?' online':'');
-    els.cloudBtnLabel.textContent=online?'Synced':configured?'Cloud':'Cloud';
+    els.cloudBtnLabel.textContent=online?(cloudDirty?'Unsynced':syncMode==='auto'?'Synced':'Manual'):configured?'Cloud':'Cloud';
     $('workspaceStorageTitle').textContent=online?'Cloud workspace':configured?'Firebase ready':'Local workspace';
-    $('workspaceStorageBadge').textContent=online?'SYNCED':configured?'READY':'LOCAL';
-    $('workspaceStorageText').textContent=online?`Signed in as ${firebaseState.user.email||firebaseState.user.displayName||'Firebase user'}. Changes sync automatically.`:configured?'Firebase is configured. Sign in with Google to sync across devices.':'Tasks are saved in this browser. Connect Firebase for cloud sync across devices.';
+    $('workspaceStorageBadge').textContent=online?(cloudDirty?'UNSYNCED':syncMode==='auto'?'AUTO':'MANUAL'):configured?'READY':'LOCAL';
+    $('workspaceStorageText').textContent=online?(syncMode==='auto'?`Signed in as ${firebaseState.user.email||firebaseState.user.displayName||'Firebase user'}. Changes sync automatically.`:`Signed in as ${firebaseState.user.email||firebaseState.user.displayName||'Firebase user'}. Manual Sync is enabled${cloudDirty?' — you have unsynced changes.':'.'}`):configured?'Firebase is configured. Sign in with Google to sync across devices.':'Tasks are saved in this browser. Connect Firebase for cloud sync across devices.';
+    updateSyncModeUi();
     $('cloudConfigState').textContent=configured?'SAVED':'NOT SAVED';
     $('cloudUserBox').hidden=!signedIn;
     $('cloudGoogleSignInBtn').disabled=!firebaseState.ready||signedIn;
@@ -5020,7 +5238,12 @@
     }
     let title='Local mode', pill='NOT CONNECTED', text='Your current data is still safe in this browser. Add your Firebase web configuration to enable cloud sync.';
     if(configured&&!signedIn){ title=firebaseState.ready?'Firebase ready':'Connecting Firebase'; pill=firebaseState.ready?'SIGN IN':'CONNECTING'; text=message||'Configuration loaded. Sign in with Google to start syncing.'; }
-    if(online){ title=mode==='connecting'?'Syncing changes':'Cloud sync active'; pill=mode==='connecting'?'SYNCING':'SYNCED'; text=message||'Your task changes are automatically saved to Cloud Firestore and mirrored in this browser.'; }
+    if(online){
+      if(mode==='connecting'){ title='Syncing changes'; pill='SYNCING'; text=message||'Updating Firebase safely…'; }
+      else if(cloudDirty){ title='Unsynced local changes'; pill='UNSYNCED'; text=message||'Your edits are safe in this browser. Press Sync now to send them to Firebase.'; }
+      else if(syncMode==='manual'){ title='Manual sync ready'; pill='MANUAL'; text=message||'Firebase is connected. Changes stay local until you press Sync now.'; }
+      else { title='Cloud sync active'; pill='SYNCED'; text=message||'Your task changes are automatically saved to Cloud Firestore and mirrored in this browser.'; }
+    }
     if(mode==='error'||firebaseState.error){ title='Cloud needs attention'; pill='ERROR'; text=message||firebaseState.error; }
     $('cloudStatusTitle').textContent=title; $('cloudStatusPill').textContent=pill; $('cloudStatusText').textContent=text;
     $('cloudLastSync').textContent=`Last sync: ${firebaseState.lastSyncAt?firebaseState.lastSyncAt.toLocaleString():'—'}`;
