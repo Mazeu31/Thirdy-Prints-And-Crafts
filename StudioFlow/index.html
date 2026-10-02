@@ -2417,7 +2417,7 @@
   }
 
 
-  /* v6.6 sync mode + history */
+  /* v6.6.1 sync mode + history */
   .sync-mode-wrap{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
   .sync-mode-btn.is-active{background:#4f46e5;color:#fff;border-color:#4f46e5;box-shadow:0 8px 20px rgba(79,70,229,.18)}
   .dark .sync-mode-btn.is-active{background:#6366f1;border-color:#6366f1;color:#fff}
@@ -3095,7 +3095,7 @@
 
 
 <style>
-  /* StudioFlow v6.6 — Firebase sync modes + task revision history */
+  /* StudioFlow v6.6.1 — Firebase sync modes + task revision history */
   .cloud-status-btn{display:inline-flex;align-items:center;gap:.45rem;white-space:nowrap}
   .cloud-dot{width:8px;height:8px;border-radius:999px;background:#94a3b8;box-shadow:0 0 0 3px rgba(148,163,184,.12)}
   .cloud-dot.connecting{background:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.13)}
@@ -3631,7 +3631,7 @@
   <div class="toast" id="toast"></div>
 
 <script>
-/* StudioFlow v6.6 — Firebase sync modes + task revision history */
+/* StudioFlow v6.6.1 — Firebase sync modes + task revision history */
 (() => {
   const STORAGE_KEY = 'videoTaskManager.tasks.v1';
   const THEME_KEY = 'videoTaskManager.theme.v1';
@@ -4975,7 +4975,33 @@
     };
     reader.readAsText(file);
   }
-  function importBackup(e){ const file=e.target.files?.[0]; if(!file)return; const reader=new FileReader(); reader.onload=()=>{try{const data=JSON.parse(reader.result); const incoming=Array.isArray(data)?data:data.tasks; if(!Array.isArray(incoming))throw new Error('Invalid file'); if(!confirm(`Import ${incoming.length} tasks? This will replace the tasks currently stored in this browser.`))return; tasks=incoming; persist(); render(); toast('Backup imported.');}catch{alert('Could not import this backup file.');} e.target.value='';}; reader.readAsText(file); }
+  function importBackup(e){
+    const file=e.target.files?.[0]; if(!file)return;
+    const reader=new FileReader();
+    reader.onload=async()=>{
+      try{
+        const data=JSON.parse(reader.result); const incoming=Array.isArray(data)?data:data.tasks;
+        if(!Array.isArray(incoming)) throw new Error('Invalid file');
+        if(!confirm(`Import ${incoming.length} tasks? This will replace the tasks currently stored in this browser.\n\nFirebase will not be deleted; use Sync now to safely merge this import with cloud tasks.`)) return;
+        tasks=incoming;
+        normalizeTimerState(); saveLocalOnly(); render();
+        if(firebaseState.user){
+          setCloudDirty(true);
+          if(syncMode==='auto'){
+            await safeCloudSyncNow(true);
+            toast('Backup imported and safely synced with Firebase.');
+          }else{
+            refreshCloudUi('Backup imported locally. Press Sync now to merge it with Firebase.','');
+            toast('Backup imported locally — press Sync now.');
+          }
+        }else{
+          toast('Backup imported locally. Sign in to Firebase to sync it.');
+        }
+      }catch(err){ alert(`Could not import this backup file.\n\n${err?.message||''}`); }
+      e.target.value='';
+    };
+    reader.readAsText(file);
+  }
   function clearDone(){ const count=tasks.filter(t=>t.status==='DONE').length; if(!count)return toast('No DONE tasks to remove.'); if(confirm(`Remove ${count} DONE task${count===1?'':'s'}? Export a backup first if you may need them later.`)){tasks=tasks.filter(t=>t.status!=='DONE');persist();render();toast('DONE tasks removed.');} }
   function clearAll(){ if(tasks.length&&confirm('Clear ALL tasks stored in this browser? This cannot be undone unless you exported a backup.')){tasks=[];persist();render();toast('All tasks cleared.');} }
 
@@ -5096,12 +5122,15 @@
       firebaseState.cloudTaskCache=new Map(cloudTasks.map(t=>[t.id,cloudJson(t)]));
 
       if(cloudTasks.length){
+        // Firebase is the persistent source. Always hydrate this browser from cloud first,
+        // then merge any newer/local-only work without deleting either side.
         const before=JSON.stringify(tasks);
         tasks=mergeTaskArrays(cloudTasks,tasks);
         normalizeTimerState(); saveLocalOnly(); render();
         if(syncMode==='auto'){ await syncAllTasksToCloud(true); setCloudDirty(false); }
         else if(JSON.stringify(tasks)!==before || tasks.length!==cloudTasks.length) setCloudDirty(true);
       }else if(tasks.length){
+        // First cloud use on this account: seed Firestore from the browser in Auto mode.
         if(syncMode==='auto'){ await syncAllTasksToCloud(true); setCloudDirty(false); }
         else setCloudDirty(true);
       }
@@ -5138,7 +5167,7 @@
     refreshCloudUi('Saving changes…','connecting');
   }
 
-  async function syncAllTasksToCloud(force=false){
+  async function syncAllTasksToCloud(force=false, deleteMissing=false){
     if(!firebaseState.user||!firebaseState.ready||firebaseState.syncing) return;
     firebaseState.syncing=true; refreshCloudUi('Syncing…','connecting');
     try{
@@ -5156,8 +5185,13 @@
           writes++;
         }
       }
-      for(const cloudId of firebaseState.cloudTaskCache.keys()){
-        if(!localIds.has(cloudId)){ batch.delete(doc(firebaseState.db,'users',firebaseState.user.uid,'tasks',cloudId)); writes++; }
+      // Normal sync is additive/update-only. Do not delete cloud tasks just because
+      // this browser does not currently have them. Deletion is allowed only for the
+      // explicit "make this browser the cloud copy" action.
+      if(deleteMissing){
+        for(const cloudId of firebaseState.cloudTaskCache.keys()){
+          if(!localIds.has(cloudId)){ batch.delete(doc(firebaseState.db,'users',firebaseState.user.uid,'tasks',cloudId)); writes++; }
+        }
       }
       if(writes) await batch.commit();
       firebaseState.cloudTaskCache=new Map(tasks.filter(t=>t?.id).map(t=>[t.id,cloudJson(JSON.parse(cloudJson(t)))]));
@@ -5200,8 +5234,8 @@
 
   async function uploadLocalToCloud(){
     if(!firebaseState.user) return toast('Sign in first.');
-    if(!confirm(`Upload ${tasks.length} task${tasks.length===1?'':'s'} from this browser and make them the cloud copy?`)) return;
-    await syncAllTasksToCloud(true); toast('Browser tasks uploaded to Firebase.');
+    if(!confirm(`Replace the cloud task list with the ${tasks.length} task${tasks.length===1?'':'s'} currently in this browser?\n\nUse this only when you intentionally want missing cloud tasks deleted.`)) return;
+    await syncAllTasksToCloud(true,true); toast('Browser task list is now the cloud copy.');
   }
 
   async function pullCloudNow(){
